@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::sync::Arc;
+use tracing::{error, info};
 
 use crate::transport::{self, Listener};
 use super::cache::DbCache;
@@ -22,7 +23,7 @@ pub async fn serve(
         let names_tcp = Arc::clone(&names);
         tokio::spawn(async move {
             if let Err(e) = serve_tcp(socket_addr, db_tcp, names_tcp).await {
-                eprintln!("[server] TCP 监听错误: {}", e);
+                error!(error = %e, "TCP 监听错误");
             }
         });
     }
@@ -40,7 +41,7 @@ async fn serve_tcp(
     names: Arc<tokio::sync::RwLock<Arc<Names>>>,
 ) -> Result<()> {
     let listener = transport::TcpListener::bind(addr).await?;
-    eprintln!("[server] 监听 TCP {}", addr);
+    info!("监听 TCP {}", addr);
 
     // TcpListener::accept 返回 Pin<Box<dyn Future>>，需要 Box::pin 包装循环
     let mut listener = listener;
@@ -50,7 +51,7 @@ async fn serve_tcp(
         let names2 = Arc::clone(&names);
         tokio::spawn(async move {
             if let Err(e) = transport::handle_connection(stream, &db2, &names2).await {
-                eprintln!("[server] 连接处理错误: {}", e);
+                error!(error = %e, "TCP 连接处理错误");
             }
         });
     }
@@ -77,7 +78,7 @@ async fn serve_unix(
         std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600))?;
     }
 
-    eprintln!("[server] 监听 {}", sock_path.display());
+    info!("监听 Unix socket {}", sock_path.display());
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -86,7 +87,7 @@ async fn serve_unix(
 
         tokio::spawn(async move {
             if let Err(e) = transport::handle_connection(stream, &db2, &names2).await {
-                eprintln!("[server] 连接处理错误: {}", e);
+                error!(error = %e, "连接处理错误");
             }
         });
     }
@@ -107,7 +108,7 @@ async fn serve_windows(
     let opts = ListenerOptions::new().name(name);
     let listener = opts.create_tokio()?;
 
-    eprintln!("[server] 监听 \\\\.\\pipe\\wx-cli-daemon");
+    info!("监听 Windows named pipe \\\\.\\pipe\\wx-cli-daemon");
 
     loop {
         let conn = listener.accept().await?;
@@ -116,7 +117,7 @@ async fn serve_windows(
 
         tokio::spawn(async move {
             if let Err(e) = transport::handle_connection(conn, &db2, &names2).await {
-                eprintln!("[server] 连接处理错误: {}", e);
+                error!(error = %e, "连接处理错误");
             }
         });
     }

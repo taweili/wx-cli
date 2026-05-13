@@ -5,6 +5,7 @@ pub mod server;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::{info, warn};
 
 use crate::config;
 
@@ -14,7 +15,7 @@ use crate::config;
 pub fn run() {
     let rt = tokio::runtime::Runtime::new().expect("无法创建 tokio runtime");
     if let Err(e) = rt.block_on(start_daemon(None)) {
-        eprintln!("[daemon] 启动失败: {}", e);
+        tracing::error!(error = %e, "启动失败");
         std::process::exit(1);
     }
 }
@@ -49,11 +50,12 @@ pub fn run_start(tcp_addr: Option<String>) -> Result<()> {
 
     let child = cmd.spawn()?;
     let pid = child.id();
-    eprintln!("[daemon] 已启动 daemon 进程 (PID {})", pid);
+    info!("已启动 daemon 进程 (PID {})", pid);
     Ok(())
 }
 
 /// daemon 核心启动逻辑（被 run() 和 WX_DAEMON_MODE 路径共享）
+#[tracing::instrument(name = "daemon.startup", skip_all)]
 pub async fn start_daemon(tcp_addr: Option<String>) -> Result<()> {
     // 确保工作目录存在
     let cli_dir = config::cli_dir();
@@ -67,18 +69,18 @@ pub async fn start_daemon(tcp_addr: Option<String>) -> Result<()> {
     // 注册 SIGTERM / SIGINT 处理
     setup_signal_handler().await;
 
-    eprintln!("[daemon] wx-daemon 启动 (PID {})", pid);
+    info!("wx-daemon 启动 (PID {})", pid);
 
     // 加载配置
     let cfg = config::load_config()?;
-    eprintln!("[daemon] DB_DIR: {}", cfg.db_dir.display());
+    info!(db_dir = %cfg.db_dir.display(), "配置加载完成");
 
     // 加载密钥
     let keys_content = tokio::fs::read_to_string(&cfg.keys_file).await
         .map_err(|e| anyhow::anyhow!("读取密钥文件 {:?} 失败: {}", cfg.keys_file, e))?;
     let keys_raw: serde_json::Value = serde_json::from_str(&keys_content)?;
     let all_keys = extract_keys(&keys_raw);
-    eprintln!("[daemon] 密钥数量: {}", all_keys.len());
+    info!("密钥数量: {}", all_keys.len());
 
     // 初始化 DbCache
     let db = Arc::new(cache::DbCache::new(cfg.db_dir.clone(), all_keys.clone()).await?);
@@ -94,9 +96,9 @@ pub async fn start_daemon(tcp_addr: Option<String>) -> Result<()> {
         .collect();
 
     // 预热：加载联系人 + 解密 session.db
-    eprintln!("[daemon] 预热...");
+    info!("开始预热...");
     let names_raw = query::load_names(&*db).await.unwrap_or_else(|e| {
-        eprintln!("[daemon] 加载联系人失败: {}", e);
+        warn!(error = %e, "加载联系人失败，使用空联系人表");
         query::Names {
             map: HashMap::new(),
             md5_to_uname: HashMap::new(),
@@ -109,7 +111,7 @@ pub async fn start_daemon(tcp_addr: Option<String>) -> Result<()> {
 
     let _ = db.get("session/session.db").await;
     let _ = db.get("sns/sns.db").await;
-    eprintln!("[daemon] 预热完成，联系人 {} 个", names.map.len());
+    info!("预热完成，联系人 {} 个", names.map.len());
 
     // 包一层内部 Arc
     let names_arc = Arc::new(tokio::sync::RwLock::new(Arc::new(names)));

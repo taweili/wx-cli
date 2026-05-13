@@ -82,7 +82,7 @@ pub async fn start_daemon(tcp_addr: Option<String>) -> Result<()> {
     // 收集消息 DB 列表
     let msg_db_keys: Vec<String> = all_keys.keys()
         .filter(|k| {
-            let k = k.replace('\', "/");
+            let k = k.replace('\\', "/");
             k.contains("message/message_") && k.ends_with(".db")
                 && !k.contains("_fts") && !k.contains("_resource")
         })
@@ -148,7 +148,7 @@ fn extract_keys(json: &serde_json::Value) -> HashMap<String, String> {
             };
             if !enc_key.is_empty() {
                 // 统一路径分隔符
-                let rel = k.replace('\', "/");
+                let rel = k.replace('\\', "/");
                 result.insert(rel, enc_key);
             }
         }

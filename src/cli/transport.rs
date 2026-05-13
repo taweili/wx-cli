@@ -121,7 +121,10 @@ fn start_daemon() -> Result<()> {
 
     // 预检：当前用户是否能写 ~/.wx-cli/。如果不能，给出可操作的错误信息，
     // 而不是 spawn 一个注定失败的 daemon 然后超时 15s。
-    preflight_cli_dir_writable()?;
+    let cli_dir = config::cli_dir();
+    if let Err(e) = std::fs::create_dir_all(&cli_dir) {
+        bail!("无法创建 {}: {}", cli_dir.display(), e);
+    }
 
     #[cfg(unix)]
     {

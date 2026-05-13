@@ -325,3 +325,67 @@ fn send_windows(req: Request) -> Result<Response> {
 
     Ok(resp)
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::ipc::{Request, Response};
+    use serde_json::json;
+    use std::net::SocketAddr;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Spawn a mock TCP server that responds to one request with the given JSON data.
+    /// Returns the bound address (with the actual random port).
+    async fn spawn_mock_server(response_body: serde_json::Value) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+
+            // Read one line (the request)
+            let mut buf_reader = tokio::io::BufReader::new(reader);
+            let mut line = String::new();
+            buf_reader.read_line(&mut line).await.unwrap();
+
+            // Write response as a JSON line
+            let resp = Response {
+                ok: true,
+                error: None,
+                data: response_body,
+            };
+            let resp_str = serde_json::to_string(&resp).unwrap() + "\n";
+            writer.write_all(resp_str.as_bytes()).await.unwrap();
+            writer.shutdown().await.unwrap();
+        });
+
+        addr
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_tcp_round_trip() {
+        let addr = spawn_mock_server(json!({
+            "sessions": [{"name": "test"}]
+        }))
+        .await;
+
+        let resp = send_tcp(Request::Sessions { limit: 20 }, &addr.to_string()).unwrap();
+        assert!(resp.ok, "Response should be ok");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_send_tcp_connection_refused() {
+        // Port 59876 is very unlikely to have a listener
+        let result = send_tcp(Request::Sessions { limit: 20 }, "127.0.0.1:59876");
+        assert!(result.is_err(), "Expected connection refused error");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_is_alive_tcp_false() {
+        // Port 59877 is very unlikely to have a listener
+        let result = is_alive_tcp("127.0.0.1:59877");
+        assert!(!result, "Expected is_alive_tcp to return false for unused port");
+    }
+}

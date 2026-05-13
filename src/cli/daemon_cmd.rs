@@ -3,28 +3,43 @@ use crate::config;
 use crate::cli::DaemonCommands;
 use crate::cli::transport;
 
-pub fn cmd_daemon(cmd: DaemonCommands) -> Result<()> {
+pub fn cmd_daemon(cmd: DaemonCommands, tcp_addr: Option<&str>) -> Result<()> {
     match cmd {
-        DaemonCommands::Status => cmd_status(),
-        DaemonCommands::Stop => cmd_stop(),
+        DaemonCommands::Status => cmd_status(tcp_addr),
+        DaemonCommands::Stop => cmd_stop(tcp_addr),
         DaemonCommands::Logs { follow, lines } => cmd_logs(follow, lines),
+        DaemonCommands::Start { tcp } => crate::daemon::run_start(tcp),
     }
 }
 
-fn cmd_status() -> Result<()> {
-    if transport::is_alive() {
+fn cmd_status(tcp_addr: Option<&str>) -> Result<()> {
+    if transport::is_alive(tcp_addr) {
         let pid_path = config::pid_path();
         let pid = std::fs::read_to_string(&pid_path)
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "?".into());
-        println!("wx-daemon 运行中 (PID {})", pid);
+        if let Some(addr) = tcp_addr {
+            println!("wx-daemon 运行中 (TCP {})", addr);
+        } else {
+            println!("wx-daemon 运行中 (PID {})", pid);
+        }
     } else {
         println!("wx-daemon 未运行");
     }
     Ok(())
 }
 
-fn cmd_stop() -> Result<()> {
+fn cmd_stop(tcp_addr: Option<&str>) -> Result<()> {
+    // TCP daemon is a separate process — cannot stop via PID file
+    if let Some(addr) = tcp_addr {
+        eprintln!(
+            "⚠ TCP daemon ({}) 是一个独立进程，无法通过 `wx daemon stop` 停止。\n\
+             请手动关闭该进程（例如 kill / taskkill PID）。",
+            addr
+        );
+        return Ok(());
+    }
+
     let pid_path = config::pid_path();
     if !pid_path.exists() {
         println!("daemon 未运行");

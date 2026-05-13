@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tracing::{debug, info};
 
 use crate::config;
 use crate::crypto;
@@ -94,7 +95,7 @@ impl DbCache {
             }
         }
         if reused > 0 {
-            eprintln!("[cache] 复用 {} 个已解密 DB", reused);
+            info!(reused, "复用已解密 DB");
         }
     }
 
@@ -146,6 +147,7 @@ impl DbCache {
                     && entry.wal_mtime == wal_mt
                     && entry.decrypted_path.exists()
                 {
+                    debug!(db = rel_key, "缓存命中");
                     return Ok(Some(entry.decrypted_path.clone()));
                 }
             }
@@ -175,7 +177,7 @@ impl DbCache {
         }
 
         let elapsed_ms = t0.elapsed().as_millis();
-        eprintln!("[cache] 解密 {} ({}ms)", rel_key, elapsed_ms);
+        info!(db = rel_key, elapsed_ms, "解密完成");
 
         // 更新内存缓存
         {

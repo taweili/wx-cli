@@ -1,14 +1,21 @@
 use anyhow::{bail, Context, Result};
 use std::io::{BufRead, BufReader, Write};
+use std::net::TcpStream;
 use std::time::Duration;
 
 use crate::config;
 use crate::ipc::{Request, Response};
 
 const STARTUP_TIMEOUT_SECS: u64 = 15;
+const TCP_CONNECT_TIMEOUT_SECS: u64 = 15;
+const TCP_RW_TIMEOUT_SECS: u64 = 120;
 
 /// 检查 daemon 是否存活
-pub fn is_alive() -> bool {
+pub fn is_alive(tcp_addr: Option<&str>) -> bool {
+    if let Some(addr) = tcp_addr {
+        return is_alive_tcp(addr);
+    }
+
     #[cfg(unix)]
     {
         use std::os::unix::net::UnixStream;
@@ -52,47 +59,58 @@ pub fn is_alive() -> bool {
     }
 }
 
+/// TCP liveness check: send ping via TCP, return true if pong received
+pub fn is_alive_tcp(addr: &str) -> bool {
+    let tcp_addr = match addr.parse() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    let mut stream = match TcpStream::connect_timeout(
+        &tcp_addr,
+        Duration::from_secs(TCP_CONNECT_TIMEOUT_SECS),
+    ) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+
+    let req = serde_json::json!({"cmd": "ping"});
+    if write!(stream, "{}\n", req).is_err() {
+        return false;
+    }
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    if reader.read_line(&mut line).is_err() {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(&line)
+        .ok()
+        .and_then(|v| v.get("pong").and_then(|p| p.as_bool()))
+        .unwrap_or(false)
+}
+
 /// 确保 daemon 运行，必要时自动启动
-pub fn ensure_daemon() -> Result<()> {
-    if is_alive() {
+/// 当指定 tcp_addr 时，不会自动启动 daemon（用户显式选择了 TCP 模式）
+pub fn ensure_daemon(tcp_addr: Option<&str>) -> Result<()> {
+    if is_alive(tcp_addr) {
         return Ok(());
     }
+
+    // TCP 模式下不自动启动 daemon，直接报错
+    if tcp_addr.is_some() {
+        let addr = tcp_addr.unwrap();
+        bail!(
+            "无法连接到 TCP daemon ({})：{}\n请确认 daemon 已通过 `wx daemon start --tcp {}` 启动",
+            addr,
+            std::io::Error::last_os_error(),
+            addr,
+        );
+    }
+
     eprintln!("启动 wx-daemon...");
     start_daemon()?;
     Ok(())
-}
-
-/// 启动 daemon 前检查 `~/.wx-cli/` 可写，给出比"超时"更明确的错误。
-///
-/// 典型坑：旧版本 `sudo wx init` 把目录留成 root 属主，非 root 的 daemon
-/// 连 socket/log 都建不了，会静默失败 15s 超时。
-fn preflight_cli_dir_writable() -> Result<()> {
-    let cli_dir = config::cli_dir();
-    std::fs::create_dir_all(&cli_dir)
-        .with_context(|| format!("创建 {} 失败", cli_dir.display()))?;
-
-    let probe = cli_dir.join(".daemon_probe");
-    match std::fs::File::create(&probe) {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&probe);
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            let dir = cli_dir.display();
-            if cfg!(unix) {
-                bail!(
-                    "无法写入 {dir}（权限不足）\n\n\
-                     这通常是老版本的 `sudo wx init` 把目录属主留成了 root。\n\
-                     修复：\n\n    \
-                     sudo chown -R $(whoami) {dir}\n\n\
-                     （新版已修复此问题，下次 init 不会再发生）",
-                )
-            } else {
-                bail!("无法写入 {dir}: {e}")
-            }
-        }
-        Err(e) => bail!("无法写入 {}: {}", cli_dir.display(), e),
-    }
 }
 
 /// 启动 daemon 进程（自身二进制，设置 WX_DAEMON_MODE=1）
@@ -155,7 +173,7 @@ fn start_daemon() -> Result<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(STARTUP_TIMEOUT_SECS);
     while std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(300));
-        if is_alive() {
+        if is_alive(None) {
             return Ok(());
         }
     }
@@ -167,9 +185,46 @@ fn start_daemon() -> Result<()> {
     )
 }
 
+/// 启动 daemon 前检查 `~/.wx-cli/` 可写，给出比"超时"更明确的错误。
+///
+/// 典型坑：旧版本 `sudo wx init` 把目录留成 root 属主，非 root 的 daemon
+/// 连 socket/log 都建不了，会静默失败 15s 超时。
+fn preflight_cli_dir_writable() -> Result<()> {
+    let cli_dir = config::cli_dir();
+    std::fs::create_dir_all(&cli_dir)
+        .with_context(|| format!("创建 {} 失败", cli_dir.display()))?;
+
+    let probe = cli_dir.join(".daemon_probe");
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            let dir = cli_dir.display();
+            if cfg!(unix) {
+                bail!(
+                    "无法写入 {dir}（权限不足）\n\n\
+                     这通常是老版本的 `sudo wx init` 把目录属主留成了 root。\n\
+                     修复：\n\n    \
+                     sudo chown -R $(whoami) {dir}\n\n\
+                     （新版已修复此问题，下次 init 不会再发生）",
+                )
+            } else {
+                bail!("无法写入 {dir}: {e}")
+            }
+        }
+        Err(e) => bail!("无法写入 {}: {}", cli_dir.display(), e),
+    }
+}
+
 /// 向 daemon 发送请求并返回响应
-pub fn send(req: Request) -> Result<Response> {
-    ensure_daemon()?;
+pub fn send(req: Request, tcp_addr: Option<&str>) -> Result<Response> {
+    if let Some(addr) = tcp_addr {
+        return send_tcp(req, addr);
+    }
+
+    ensure_daemon(None)?;
 
     #[cfg(unix)]
     {
@@ -183,6 +238,38 @@ pub fn send(req: Request) -> Result<Response> {
     {
         bail!("不支持当前平台")
     }
+}
+
+/// 通过 TCP 发送请求并返回响应
+pub fn send_tcp(req: Request, addr: &str) -> Result<Response> {
+    let mut stream = TcpStream::connect_timeout(
+        &addr.parse().context("TCP 地址格式无效")?,
+        Duration::from_secs(TCP_CONNECT_TIMEOUT_SECS),
+    )
+    .context(format!("连接 TCP daemon ({}) 失败", addr))?;
+
+    stream
+        .set_read_timeout(Some(Duration::from_secs(TCP_RW_TIMEOUT_SECS)))
+        .ok();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(TCP_RW_TIMEOUT_SECS)))
+        .ok();
+
+    let req_str = serde_json::to_string(&req)? + "\n";
+    stream.write_all(req_str.as_bytes())?;
+
+    let mut line = String::new();
+    let mut reader = BufReader::new(&stream);
+    reader.read_line(&mut line)?;
+
+    let resp: Response = serde_json::from_str(&line)
+        .context("解析 daemon 响应失败")?;
+
+    if !resp.ok {
+        bail!("{}", resp.error.as_deref().unwrap_or("未知错误"));
+    }
+
+    Ok(resp)
 }
 
 #[cfg(unix)]

@@ -505,4 +505,67 @@ mod tcp_integration_tests {
             addr
         );
     }
+
+    /// Compare TCP and local transport responses for the same query.
+    /// Marked `#[ignore]` because it requires WeChat data to be present on the machine.
+    /// Run manually: `cargo test -- --ignored test_tcp_matches_local_sessions`
+    #[test]
+    #[ignore]
+    fn test_tcp_matches_local_sessions() {
+        let binary = ensure_binary();
+
+        // Pick a free ephemeral port for TCP daemon
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")
+                .expect("failed to bind ephemeral port");
+            listener.local_addr().unwrap().port()
+        };
+        let tcp_addr = format!("127.0.0.1:{}", port);
+
+        // --- Phase 1: Query via TCP ---
+        let mut tcp_child = Command::new(&binary)
+            .env("WX_DAEMON_MODE", "1")
+            .env("WX_DAEMON_TCP_ADDR", &tcp_addr)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to spawn wx daemon (TCP)");
+        let tcp_pid = tcp_child.id();
+        eprintln!("[test] TCP daemon PID {}", tcp_pid);
+
+        if !wait_for_tcp_ready(&tcp_addr) {
+            let _ = tcp_child.kill();
+            let _ = tcp_child.wait();
+            panic!("TCP daemon did not become ready within {}s", STARTUP_TIMEOUT_SECS);
+        }
+        eprintln!("[test] TCP daemon ready on {}", tcp_addr);
+
+        let tcp_resp = send_tcp(Request::Sessions { limit: 20 }, &tcp_addr)
+            .expect("send_tcp(Sessions) should succeed");
+
+        // Terminate TCP daemon
+        unsafe { libc::kill(tcp_pid as libc::pid_t, libc::SIGTERM) };
+        let _ = tcp_child.wait();
+        eprintln!("[test] TCP daemon terminated");
+
+        // --- Phase 2: Query via local transport ---
+        // send() with tcp_addr=None will auto-start a daemon on the Unix socket
+        let local_resp = send(Request::Sessions { limit: 20 }, None)
+            .expect("send(Sessions) via local transport should succeed");
+
+        // --- Phase 3: Deep-compare responses ---
+        let tcp_data = serde_json::to_value(&tcp_resp.data)
+            .expect("tcp_resp.data should be serializable");
+        let local_data = serde_json::to_value(&local_resp.data)
+            .expect("local_resp.data should be serializable");
+
+        assert_eq!(
+            tcp_data, local_data,
+            "TCP and local transport responses differ!\nTCP:   {}\nLocal: {}",
+            serde_json::to_string_pretty(&tcp_data).unwrap(),
+            serde_json::to_string_pretty(&local_data).unwrap(),
+        );
+        eprintln!("[test] TCP and local responses match ✓");
+    }
 }

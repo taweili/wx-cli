@@ -20,7 +20,7 @@ fn init_logging() {
     // 默认只输出 WARN+ 到 stderr（不污染用户可见的 stdout）。
     // 通过 `RUST_LOG=info` 或 `RUST_LOG=debug` 开启详细日志。
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("warn")
+        EnvFilter::new("info")
     });
     tracing_subscriber::fmt()
         .with_target(false)

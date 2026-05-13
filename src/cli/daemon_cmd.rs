@@ -8,7 +8,7 @@ pub fn cmd_daemon(cmd: DaemonCommands, tcp_addr: Option<&str>) -> Result<()> {
         DaemonCommands::Status => cmd_status(tcp_addr),
         DaemonCommands::Stop => cmd_stop(tcp_addr),
         DaemonCommands::Logs { follow, lines } => cmd_logs(follow, lines),
-        DaemonCommands::Start { tcp } => crate::daemon::run_start(tcp),
+        DaemonCommands::Start { tcp } => crate::daemon::run_start(tcp.or_else(|| tcp_addr.map(String::from))),
     }
 }
 

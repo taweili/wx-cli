@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use anyhow::Result;
+use tracing::info;
 
 use crate::daemon::cache::DbCache;
 use crate::daemon::query::Names;
@@ -81,6 +82,7 @@ where
         }
     };
 
+    info!(cmd = ?req, "收到请求");
     let resp = dispatch(req, db, names).await;
     writer.write_all(resp.to_json_line()?.as_bytes()).await?;
     Ok(())

@@ -24,7 +24,7 @@ use clap::{Parser, Subcommand};
 #[command(name = "wx", version = env!("CARGO_PKG_VERSION"), about = "wx — 微信本地数据 CLI")]
 pub struct Cli {
     /// 通过 TCP 连接 daemon（如 127.0.0.1:9876）
-    #[arg(long)]
+    #[arg(long, require_equals = true)]
     pub tcp: Option<String>,
 
     #[command(subcommand)]

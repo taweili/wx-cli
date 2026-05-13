@@ -389,3 +389,120 @@ mod integration_tests {
         assert!(!result, "Expected is_alive_tcp to return false for unused port");
     }
 }
+
+/// Real TCP daemon integration tests — spawn the actual `wx` daemon binary,
+/// connect via TCP, and verify end-to-end request/response round-trip.
+///
+/// These tests are `#[cfg(unix)]` only and require the `wx` binary to have
+/// been built with `cargo build --bin wx`.
+#[cfg(unix)]
+#[cfg(test)]
+mod tcp_integration_tests {
+    use super::*;
+    use crate::ipc::Request;
+    use std::process::Command;
+
+    /// Build the `wx` binary so the daemon subprocess is available.
+    fn ensure_binary() -> std::path::PathBuf {
+        let status = Command::new("cargo")
+            .args(["build", "--bin", "wx"])
+            .output()
+            .expect("cargo build failed to execute");
+        if !status.status.success() {
+            panic!(
+                "cargo build --bin wx failed:\n{}",
+                String::from_utf8_lossy(&status.stderr)
+            );
+        }
+        // Binary path: target/debug/wx
+        let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("target/debug/wx");
+        assert!(p.exists(), "wx binary not found at {:?}", p);
+        p
+    }
+
+    /// Wait for the daemon TCP endpoint to become ready.
+    fn wait_for_tcp_ready(addr: &str) -> bool {
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(STARTUP_TIMEOUT_SECS);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            if is_alive_tcp(addr) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn test_tcp_daemon_ping_round_trip() {
+        let binary = ensure_binary();
+
+        // Pick a free ephemeral port
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")
+                .expect("failed to bind ephemeral port");
+            listener.local_addr().unwrap().port()
+        };
+        let addr = format!("127.0.0.1:{}", port);
+
+        // Spawn the daemon subprocess in TCP-only mode
+        let mut child = Command::new(&binary)
+            .env("WX_DAEMON_MODE", "1")
+            .env("WX_DAEMON_TCP_ADDR", &addr)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to spawn wx daemon");
+
+        let pid = child.id();
+        eprintln!("[test] spawned daemon PID {}", pid);
+
+        // Wait for TCP readiness
+        if !wait_for_tcp_ready(&addr) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "daemon did not become ready on {} within {}s (PID {})",
+                addr, STARTUP_TIMEOUT_SECS, pid
+            );
+        }
+        eprintln!("[test] daemon ready on {}", addr);
+
+        // Send Ping request and verify pong
+        let resp = send_tcp(Request::Ping, &addr)
+            .expect("send_tcp(Ping) should succeed");
+        assert!(resp.ok, "Response ok flag should be true");
+
+        let pong = resp.data.get("pong").and_then(|v| v.as_bool());
+        assert!(
+            pong == Some(true),
+            "Expected pong=true in response, got: {:?}",
+            resp.data
+        );
+
+        // Terminate daemon
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+
+        // Verify clean exit
+        let exit_status = child.wait().expect("failed to wait on daemon");
+        assert!(
+            exit_status.success(),
+            "daemon should exit cleanly, got: {:?}",
+            exit_status
+        );
+    }
+
+    #[test]
+    fn test_tcp_daemon_connection_refused() {
+        // Port 59889 is very unlikely to have a listener
+        let addr = "127.0.0.1:59889";
+        let result = send_tcp(Request::Ping, addr);
+        assert!(
+            result.is_err(),
+            "Expected connection refused error when no daemon is listening on {}",
+            addr
+        );
+    }
+}
